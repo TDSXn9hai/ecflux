@@ -1,0 +1,73 @@
+_base_: base.yaml
+# 4.2 多粒度结构化压缩 + APRA
+calib:
+  num_batches: 32                 # 重要性评估的校准 batch 数（取自缓存数据）
+  batch_size: 2
+eval:
+  metric: fid                     # fid（报告设定）/ velocity_mse / flow_loss（快速代理）
+  prompts: data/val_prompts.txt   # D_val：1000 条 prompt
+  num_prompts: 1000
+  reference_dir: data/val_reference_images
+  steps: 20
+  guidance_scale: 4.0
+  height: 512
+  width: 512
+  proxy_batches: 16               # velocity_mse / flow_loss 使用的固定 batch 数
+
+prune:
+  head_metric: grad               # grad（梯度敏感度）/ magnitude / random
+  neuron_metric: activation       # activation（激活 L1）/ magnitude / random
+  modality_aware: true            # 跨模态头与自注意力头区分上界
+  cross_ratio_threshold: 1.0      # 头的「文本注意力质量 / 均匀分配」> 阈值 -> 跨模态头
+  alpha_cross: 0.15
+  alpha_self: 0.40
+  beta_ffn: 0.35
+  min_heads: 1
+  neuron_align: 8                 # FFN 剪枝数取 8 的倍数（对齐张量核；非对齐时 SDPA 反向报 misaligned address）
+  prune_heads: true               # 粒度消融
+  prune_neurons: true
+  prune_ff_context: true          # 是否同时剪 Double Block 的文本流 FFN
+  prune_blocks: true
+
+groups:                           # 表1；块编号 0-based（G1 = Double Block 1–2）
+  - {name: G1, double: [0, 1], single: [], init: 0.05}
+  - {name: G2, double: [2, 3], single: [], init: 0.10}
+  - {name: G3, double: [4], single: [], init: 0.15}
+  - {name: G4, double: [], single: [0, 1, 2, 3, 4, 5, 6, 7], init: 0.15}
+  - {name: G5, double: [], single: [8, 9, 10, 11, 12, 13, 14, 15], init: 0.25}
+  - {name: G6, double: [], single: [16, 17, 18, 19], init: 0.35}
+
+apra:
+  enabled: true                   # false -> 固定比例一次性剪枝
+  rounds: 5                       # T
+  feedback: global                # global（报告原式）/ per_group（逐组敏感度探测）
+  low: 0.5                        # ΔFID < low  -> γ × up
+  high: 2.0                       # ΔFID > high -> γ × down
+  up: 1.15
+  down: 0.80
+  mid: 1.02
+  gamma_min: 0.02
+  gamma_max: 0.5
+  rollback: false                 # ΔFID > high 时撤销本轮剪枝
+  target_param_ratio: null        # 例如 0.7：DiT 参数量降到 70% 即停止
+  uniform_rate: null              # 消融：所有组同一初始剪枝率
+  per_group_thresholds: {}        # per_group 模式下可单独设置 low/high
+
+block:
+  stage: after                    # after（解耦，报告设定）/ before / none
+  tau: 0.92
+  max_blocks: 4
+  allow_consecutive: false
+  protect: []
+
+recover:
+  steps: 2000
+  block_steps: 2000
+  lr: 1.0e-5
+  warmup_steps: 50
+  batch_size: 1
+  grad_accum: 4
+  gradient_checkpointing: true
+  use_8bit_adam: true
+  mixed_precision: bf16
+  log_every: 50

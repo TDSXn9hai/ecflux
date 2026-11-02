@@ -1,0 +1,28 @@
+# 公共配置（各阶段配置通过 _base_: base.yaml 继承；命令行 --set a.b=c 覆盖任意字段）
+seed: 42
+device: cuda
+dtype: bf16                       # DiT 权重精度：bf16 / fp16 / fp32
+
+paths:
+  student_pipeline: weights/FLUX.2-klein-base-4B   # 基线（diffusers 管线目录或 HF repo id）
+  teacher_pipeline: weights/FLUX.2-klein-base-9B   # 教师（gated，需 HF 授权后下载）
+  output_root: outputs
+
+data:
+  mode: online                                    # online：读 sources 原始图文并在线编码，不需要缓存；cache：读 cache_dirs
+  cache_dirs: [data/cache/laion_aes65]            # cache_dataset.py 的输出
+  sources: [data/pexels_aes/index.jsonl]          # mode=online：图片目录（xxx.jpg + xxx.txt）或 jsonl，可多个
+  min_aesthetic: null                             # mode=online：美学分过滤
+  max_samples: null                               # mode=online：每个 source 最多取多少条
+  encoder_device: null                            # mode=online：VAE / 文本编码器所在设备，默认与 device 相同（如 cuda:1）
+  mix_ratios: null                                # 多个缓存目录 / source 时的采样比例，如 [0.8, 0.2]
+  max_sequence_length: 512                        # 与官方管线一致；缩短可显著降低缓存体积与显存
+  resolution: 512
+
+timesteps:
+  mode: uniform                                   # uniform（报告 t~U(0,1)）/ logit_normal
+  shift: 1.0
+
+wandb:
+  enabled: false
+  project: ecflux

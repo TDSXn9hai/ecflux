@@ -1,0 +1,46 @@
+_base_: base.yaml
+# 4.3 面向 Rectified Flow 的语义对齐知识蒸馏
+student: outputs/prune/default/pruned     # 剪枝模型目录（含 prune_spec.json）
+teacher:
+  mode: online                    # online / offline
+  embeds_key: teacher_prompt_embeds   # 9B 教师使用 Qwen3-8B，嵌入与学生不同；同构教师用 prompt_embeds
+  offline_dir: data/teacher_cache     # mode=offline 时 cache_teacher.py 的输出
+  config: null                    # offline 时教师 transformer/config.json 路径（用于层位映射与投影维度）
+  num_draws: 2                    # 离线缓存时每个样本的 (t, ε) 抽样次数
+
+distill:
+  lambda_vel: 1.0
+  lambda_hid: 0.5
+  lambda_attn: 0.1
+  lambda_gt: 0.0                  # 可选：额外的真值 Rectified Flow 损失
+  use_vel: true                   # 三级损失消融开关
+  use_hid: true
+  use_attn: true
+  robust: true                    # 速度场噪声扰动扩展 δ~N(0, σ²I)
+  robust_sigma: 0.01
+  progressive: true               # 由粗到细：hid/attn 权重从 ramp_start 线性升到 ramp_end
+  ramp_start: 1000
+  ramp_end: 5000
+  student_hidden_layers: [double:3, double:4, single:11]   # G2 末尾、G3 末尾、G5 中间（原始编号）
+  teacher_hidden_layers: auto     # auto：按相对深度映射；或显式列表
+  hidden_kind: cos                # cos（报告）/ mse
+  attn_k: 2                       # 只对齐前 k 个 Double Block（k 通过消融确定）
+  attn_head_mode: mean            # mean（师生头数不同）/ match（同构教师逐头）
+  attn_kind: fro                  # fro（报告 Frobenius²）/ kl
+  attn_reduction: mean
+  attn_query_stride: 2            # 图像 query 下采样，降低注意力图显存
+
+train:
+  max_steps: 20000
+  micro_batch_size: 1
+  global_batch_size: 64           # 梯度累积得到
+  lr: 1.0e-5
+  warmup_steps: 200
+  weight_decay: 0.01
+  use_8bit_adam: true
+  gradient_checkpointing: true
+  mixed_precision: bf16           # bf16 / fp16 / no
+  max_grad_norm: 1.0
+  num_workers: 4
+  log_every: 10
+  save_every: 2000

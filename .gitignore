@@ -1,0 +1,25 @@
+# 环境 / 缓存
+.venv/
+.venv-*/
+.uv_cache/
+__pycache__/
+*.pyc
+*.pyo
+
+# 权重与模型缓存
+weights/
+
+# 数据集（由 install.sh 下载/构建），仅保留构建脚本
+data/*
+!data/prepare_pexels_aes.py
+
+# 运行产物与日志
+outputs/
+*.log
+wandb/
+
+# 临时文件
+.req_core.txt
+.con.txt
+*.tmp
+.DS_Store

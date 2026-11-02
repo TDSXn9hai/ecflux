@@ -1,0 +1,29 @@
+_base_: base.yaml
+# 4.4 任务复杂度判别器与端云协同
+labels:
+  weights: {clip: 1.0, hps: 1.0, geneval: 1.0}
+  norm: zscore
+  threshold: 0.0                  # gap > threshold -> 复杂
+  threshold_mode: value           # value / quantile
+router:
+  features: emb+struct            # emb / struct / emb+struct（特征消融）
+  hidden: 512
+  dropout: 0.1
+  lr: 1.0e-3
+  epochs: 50
+  batch_size: 128
+  balance: true
+  val_ratio: 0.2
+calibration:
+  cloud_budget: 0.3               # 云端调用率上限；null 时按 objective 最优
+  objective: f1
+collab:
+  mode: router                    # router / edge / cloud / random
+  random_ratio: 0.3
+  cascade: true                   # 阈值附近启用端侧先生成 + HPSv2 校验
+  band: 0.1
+  hps_gate: 0.25
+  steps: 20
+  guidance_scale: 4.0
+  height: 1024
+  width: 1024

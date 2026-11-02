@@ -1,0 +1,28 @@
+# ecflux —— FLUX.2 Klein 端侧压缩 / 蒸馏 / 端云协同
+# 环境：Python >= 3.10（已在 3.11 上测试），Linux，CUDA 12.x/13.x，单卡 RTX 4090 24GB
+# 先按 https://pytorch.org 安装匹配 CUDA 的 torch / torchvision，再执行 pip install -r requirements.txt
+# 以下版本是本仓库冒烟测试实际使用 / 解析到的版本
+
+# ---- 核心
+torch==2.14.1
+torchvision==0.29.1
+diffusers==0.37.0          # 需 >=0.37：Flux2Transformer2DModel / Flux2KleinPipeline / AutoencoderKLFlux2
+transformers==5.19.0       # Qwen3 文本编码器
+accelerate==1.15.0
+safetensors==0.8.0
+huggingface_hub==1.33.0
+numpy==2.4.6
+PyYAML==6.0.3
+pillow==12.3.0
+
+# ---- 训练
+bitsandbytes==0.50.2       # AdamW 8-bit（仅 CUDA；无 GPU 时自动回退到 torch AdamW）
+wandb==0.31.0              # 可选：configs 中 wandb.enabled=true 时使用
+
+# ---- 评估
+torchmetrics==1.9.0        # FID
+torch-fidelity==0.4.0      # torchmetrics FID 的 Inception 后端
+scipy==1.17.1
+hpsv2==1.2.0               # HPSv2.1；其依赖较旧，冲突时可用 pip install hpsv2==1.2.0 --no-deps 再补装 open_clip_torch
+# hpsv2 wheel 缺 bpe_simple_vocab_16e6.txt.gz，需手动补到 site-packages/hpsv2/src/open_clip/（见 README 第 2 节）
+# GenEval / T2I-CompBench 使用官方仓库评测（见 README），不在此安装
