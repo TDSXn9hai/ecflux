@@ -108,6 +108,7 @@ class FeatureRecorder:
         self.detach = detach
         self.hidden, self.attn, self.head_mass = {}, {}, {}
         self.txt_len = None
+        self.txt_mask = None  # (B, T)；设置后 head_mass 只统计非 padding 文本 token
         self._handles, self._saved_proc = [], []
 
     # -- recording callbacks
@@ -119,6 +120,8 @@ class FeatureRecorder:
         if want_mass and self.head_mass_on:
             with torch.no_grad():
                 p = _txt_attention_probs(q, k, txt_len, img, max(self.query_stride, 4))
+                if self.txt_mask is not None:
+                    p = p * self.txt_mask.to(p.device, p.dtype)[:, None, None, :]
                 m = p.sum(-1).mean(dim=(0, 2))  # H
             key = name if isinstance(name, tuple) else ("double", name)
             self.head_mass[key] = self.head_mass.get(key, 0) + m.cpu()

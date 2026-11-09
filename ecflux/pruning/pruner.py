@@ -106,7 +106,12 @@ def prune_to_rates(model, importance: dict, rates: dict, groups: list, cfg: dict
     """按各组剪枝率执行头 + 神经元剪枝。cfg 中 prune_heads / prune_neurons 为粒度消融开关。"""
     units = init_unit_meta(model)
     if cfg.get("modality_aware", True):
-        assign_head_types(model, importance.get("head_text_ratio", {}), cfg.get("cross_ratio_threshold", 1.0))
+        ratios = importance.get("head_text_ratio", {})
+        thr = cfg.get("cross_ratio_threshold", 1.0)
+        q = cfg.get("cross_ratio_quantile")  # 设置时按全部头文本注意力占比的分位数定阈值（覆盖 cross_ratio_threshold）
+        if q is not None and ratios:
+            thr = float(torch.cat([v.float().flatten() for v in ratios.values()]).quantile(float(q)))
+        assign_head_types(model, ratios, thr)
     beta = cfg.get("beta_ffn", 0.35)
     align = int(cfg.get("neuron_align", 8))
     alpha_max = max(cfg.get("alpha_self", 0.40), cfg.get("alpha_cross", 0.15))

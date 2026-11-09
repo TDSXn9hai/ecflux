@@ -147,8 +147,9 @@ class OnlineEncoder:
         from .flux_utils import encode_images
 
         caps = list(batch["caption"])
+        emb, mask = self.te.encode(caps, return_mask=True)
         out = {"caption": caps, "latents": encode_images(self.vae, batch["pixel_values"]),
-               "prompt_embeds": self.te.encode(caps)}
+               "prompt_embeds": emb, "txt_mask": mask}
         if self.tte is not None:
             out["teacher_prompt_embeds"] = self.tte.encode(caps)
         return out

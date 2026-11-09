@@ -80,13 +80,29 @@ def head_magnitude(model) -> dict:
 class _ActStats:
     """SwiGLU 输出 a_j 的 L1 均值累加器（forward hook）。"""
 
-    def __init__(self):
+    def __init__(self, name: str = "ff", ctx: dict | None = None):
         self.sum, self.n = 0, 0
+        self.name, self.ctx = name, ctx if ctx is not None else {}
+
+    def _weights(self, a):
+        """按 token 加权：ctx["mask"] (B,T) 非空时排除 padding 文本 token（ff_context 全是文本，single 前 T 个是文本）。"""
+        m = self.ctx.get("mask")
+        if m is None or self.name == "ff":
+            return None
+        m = m.to(a.device, a.dtype)
+        if self.name == "mlp":
+            m = torch.cat([m, m.new_ones(m.shape[0], a.shape[1] - m.shape[1])], 1)
+        return m
 
     def __call__(self, _mod, _inp, out):
         a = out.detach().float().abs()
-        self.sum = self.sum + a.reshape(-1, a.shape[-1]).sum(0).cpu()
-        self.n += a.reshape(-1, a.shape[-1]).shape[0]
+        w = self._weights(a)
+        if w is None:
+            self.sum = self.sum + a.reshape(-1, a.shape[-1]).sum(0).cpu()
+            self.n += a.reshape(-1, a.shape[-1]).shape[0]
+        else:
+            self.sum = self.sum + (a * w[..., None]).sum((0, 1)).cpu()
+            self.n += float(w.sum())
 
     @property
     def value(self):
@@ -107,12 +123,14 @@ def _ffn_modules(model):
 
 
 @torch.no_grad()
-def forward_statistics(model, batches, want_neurons=True, want_mass=True, want_block_sim=True) -> dict:
+def forward_statistics(model, batches, want_neurons=True, want_mass=True, want_block_sim=True,
+                       mask_padding=True, neuron_mask_padding=False) -> dict:
     """一次无梯度遍历同时统计：神经元激活 L1、逐头文本注意力质量、相邻 Single Block 余弦相似度。"""
     stats, handles = {}, []
+    act_ctx = {"mask": None}
     if want_neurons:
         for key, act, _ in _ffn_modules(model):
-            stats[key] = _ActStats()
+            stats[key] = _ActStats(key[2], act_ctx)
             handles.append(act.register_forward_hook(stats[key]))
 
     bm = block_map(model)
@@ -130,9 +148,13 @@ def forward_statistics(model, batches, want_neurons=True, want_mass=True, want_b
         with rec:
             for fb in batches:
                 outs.clear()
+                rec.txt_mask = fb.get("txt_mask") if mask_padding else None
+                act_ctx["mask"] = fb.get("txt_mask") if neuron_mask_padding else None
                 fm_forward(model, fb)
                 if want_mass:
                     t, n = fb["prompt_embeds"].shape[1], fb["x_t"].shape[1]
+                    if rec.txt_mask is not None:  # 均匀分配基准只按有效文本 token 计
+                        t = float(rec.txt_mask.float().sum(-1).mean())
                     mass_norm["uniform"] = t / (t + n)
                 if want_block_sim:
                     order = bm["single"]
@@ -177,6 +199,34 @@ def neuron_magnitude(model) -> dict:
     return out
 
 
+@torch.no_grad()
+def head_ablation_scores(model, batches, kinds=("double",)) -> dict:
+    """逐头删除后的速度场误差（相对当前模型，×100）作为头重要性，值越大越重要。
+    阶段1发现梯度敏感度会把 double:0 的关键头（删掉单个头即造成生成崩溃）排在末尾，Double Block 头数少，可直接逐头测。"""
+    import copy
+
+    from .prune_ops import prune_double_heads
+
+    ref = [fm_forward(model, fb).float() for fb in batches]
+    bm = block_map(model)
+    out = {}
+    if "double" in kinds:
+        for pos, orig in enumerate(bm["double"]):
+            blk = model.transformer_blocks[pos]
+            h = blk.attn.heads
+            scores = torch.zeros(h)
+            for i in range(h if h > 1 else 0):
+                tmp = copy.deepcopy(blk)
+                prune_double_heads(tmp, torch.tensor([j for j in range(h) if j != i]))
+                model.transformer_blocks[pos] = tmp
+                scores[i] = sum(100 * F.mse_loss(fm_forward(model, fb).float(), r).item()
+                                for fb, r in zip(batches, ref)) / len(batches)
+                model.transformer_blocks[pos] = blk
+                del tmp
+            out[("double", orig)] = scores
+    return out
+
+
 def collect_importance(model, batches, cfg: dict, seed: int = 0) -> dict:
     """汇总三粒度重要性。返回
     {"heads": {(kind,orig): (H,)}, "head_text_ratio": {...}, "neurons": {(kind,orig,name): (M,)}, "block_sim": {...}}
@@ -184,7 +234,9 @@ def collect_importance(model, batches, cfg: dict, seed: int = 0) -> dict:
     head_metric = cfg.get("head_metric", "grad")
     neuron_metric = cfg.get("neuron_metric", "activation")
     fs = forward_statistics(model, batches, want_neurons=neuron_metric == "activation",
-                            want_mass=cfg.get("modality_aware", True), want_block_sim=True)
+                            want_mass=cfg.get("modality_aware", True), want_block_sim=True,
+                            mask_padding=cfg.get("mask_text_padding", True),
+                            neuron_mask_padding=cfg.get("neuron_mask_padding", False))
     g = torch.Generator().manual_seed(seed)
     if head_metric == "grad":
         heads = head_grad_sensitivity(model, batches)
@@ -194,6 +246,8 @@ def collect_importance(model, batches, cfg: dict, seed: int = 0) -> dict:
         heads = {k: torch.rand(v.shape, generator=g) for k, v in head_magnitude(model).items()}
     else:
         raise ValueError(head_metric)
+    if head_metric == "grad" and cfg.get("double_head_metric", "grad") == "ablation":
+        heads.update(head_ablation_scores(model, batches[: int(cfg.get("head_ablation_batches", 8))]))
     if neuron_metric == "activation":
         neurons = fs["neurons"]
     elif neuron_metric == "magnitude":

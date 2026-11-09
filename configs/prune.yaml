@@ -16,9 +16,13 @@ eval:
 
 prune:
   head_metric: grad               # grad（梯度敏感度）/ magnitude / random
-  neuron_metric: activation       # activation（激活 L1）/ magnitude / random
+  double_head_metric: ablation    # head_metric=grad 时 Double Block 的头改用逐头删除的速度场误差（阶段1：梯度判据误剪 double:0 head18）
+  head_ablation_batches: 8        # 逐头删除评分使用的校准 batch 数
+  mask_text_padding: true         # 文本注意力占比只统计非 padding token
+  neuron_metric: magnitude        # magnitude / activation（开题原判据：激活 L1）/ random；阶段2：激活判据恢复训练后 FID 明显更差（73.3 vs 71.1，同参数量）
   modality_aware: true            # 跨模态头与自注意力头区分上界
   cross_ratio_threshold: 1.0      # 头的「文本注意力质量 / 均匀分配」> 阈值 -> 跨模态头
+  cross_ratio_quantile: 0.75      # 按分位数定阈值：文本占比前 25% 的头视为跨模态头（去 padding 后阈值 1.0 会把 68% 的头判为跨模态）
   alpha_cross: 0.15
   alpha_self: 0.40
   beta_ffn: 0.35
@@ -41,14 +45,14 @@ apra:
   enabled: true                   # false -> 固定比例一次性剪枝
   rounds: 5                       # T
   feedback: global                # global（报告原式）/ per_group（逐组敏感度探测）
-  low: 0.5                        # ΔFID < low  -> γ × up
-  high: 2.0                       # ΔFID > high -> γ × down
+  low: 0.73                       # ΔFID < low  -> γ × up（1σ，阶段0 D_val FID 种子波动 σ=0.73；开题原设 0.5）
+  high: 2.2                       # ΔFID > high -> γ × down（3σ；开题原设 2.0）
   up: 1.15
   down: 0.80
   mid: 1.02
   gamma_min: 0.02
   gamma_max: 0.5
-  rollback: false                 # ΔFID > high 时撤销本轮剪枝
+  rollback: true                  # ΔFID > high 时撤销本轮剪枝（已剪结构无法恢复，否则 γ 下调不起作用）
   target_param_ratio: null        # 例如 0.7：DiT 参数量降到 70% 即停止
   uniform_rate: null              # 消融：所有组同一初始剪枝率
   per_group_thresholds: {}        # per_group 模式下可单独设置 low/high

@@ -262,8 +262,11 @@ def prepare_fm_batch(batch: dict, device, dtype, generator=None, timestep_cfg: d
                              logit_mean=tc.get("logit_mean", 0.0), logit_std=tc.get("logit_std", 1.0),
                              shift=tc.get("shift", 1.0)).to(device)
     x_t, v = add_noise(x0, t, noise)
-    return {"x_t": x_t.to(dtype), "t": t.to(dtype), "noise": noise, "x0": x0, "target": v,
-            "prompt_embeds": emb, "img_ids": img_ids, "txt_ids": txt_ids}
+    out = {"x_t": x_t.to(dtype), "t": t.to(dtype), "noise": noise, "x0": x0, "target": v,
+           "prompt_embeds": emb, "img_ids": img_ids, "txt_ids": txt_ids}
+    if "txt_mask" in batch:  # 文本有效 token 掩码（仅用于统计，不传给模型；官方管线推理时也不加掩码）
+        out["txt_mask"] = batch["txt_mask"].to(device)
+    return out
 
 
 def fm_forward(model, fb: dict, x_t=None, prompt_embeds=None, txt_ids=None, **kw) -> torch.Tensor:
