@@ -1,0 +1,142 @@
+{
+  "hps200_base4b": 0.2829838738590479,
+  "hps200_teacher9b": 0.27705127239227295,
+  "runs": {
+    "full": {
+      "0": {
+        "hps_abs": 0.24001615211367608,
+        "hps_drop": 0.042967721745371806,
+        "traj": 33.48101080395281,
+        "path": "outputs/stage2_v2/full/pruned"
+      },
+      "1000": {
+        "hps_abs": 0.234157425314188,
+        "hps_drop": 0.048826448544859874,
+        "traj": 33.36757590062916,
+        "path": "outputs/stage3_blockrec/full/step_1000"
+      },
+      "2000": {
+        "hps_abs": 0.23820193462073802,
+        "hps_drop": 0.044781939238309865,
+        "traj": 31.667889654636383,
+        "path": "outputs/stage3_blockrec/full/step_2000"
+      },
+      "3000": {
+        "hps_abs": 0.24090383268892765,
+        "hps_drop": 0.042080041170120236,
+        "traj": 30.994036123156548,
+        "path": "outputs/stage3_blockrec/full/step_3000"
+      },
+      "4000": {
+        "hps_abs": 0.2410098498314619,
+        "hps_drop": 0.04197402402758599,
+        "traj": 30.953204138204455,
+        "path": "outputs/stage3_blockrec/full/final"
+      }
+    },
+    "no_block": {
+      "0": {
+        "hps_abs": 0.2545430029928684,
+        "hps_drop": 0.02844087086617947,
+        "traj": 25.652403719723225,
+        "path": "outputs/stage2_v2/no_block/pruned"
+      },
+      "1000": {
+        "hps_abs": 0.25944077476859095,
+        "hps_drop": 0.02354309909045693,
+        "traj": 26.829057107679546,
+        "path": "outputs/stage3_blockrec/no_block/step_1000"
+      },
+      "2000": {
+        "hps_abs": 0.2622538489103317,
+        "hps_drop": 0.020730024948716175,
+        "traj": 24.180856770835817,
+        "path": "outputs/stage3_blockrec/no_block/step_2000"
+      },
+      "3000": {
+        "hps_abs": 0.2626569102704525,
+        "hps_drop": 0.02032696358859537,
+        "traj": 23.529162695631385,
+        "path": "outputs/stage3_blockrec/no_block/step_3000"
+      },
+      "4000": {
+        "hps_abs": 0.26327359572052955,
+        "hps_drop": 0.019710278138518333,
+        "traj": 23.506085225380957,
+        "path": "outputs/stage3_blockrec/no_block/final"
+      }
+    },
+    "fixed_ratio": {
+      "0": {
+        "hps_abs": 0.2458781436830759,
+        "hps_drop": 0.03710573017597199,
+        "traj": 26.457808455452323,
+        "path": "outputs/stage2_v2/fixed_ratio/pruned"
+      },
+      "1000": {
+        "hps_abs": 0.24926433101296425,
+        "hps_drop": 0.03371954284608364,
+        "traj": 27.00330870691687,
+        "path": "outputs/stage3_blockrec/fixed_ratio/step_1000"
+      },
+      "2000": {
+        "hps_abs": 0.25059281319379806,
+        "hps_drop": 0.03239106066524983,
+        "traj": 25.01997596118599,
+        "path": "outputs/stage3_blockrec/fixed_ratio/step_2000"
+      },
+      "3000": {
+        "hps_abs": 0.2534006551653147,
+        "hps_drop": 0.029583218693733204,
+        "traj": 24.31261462159455,
+        "path": "outputs/stage3_blockrec/fixed_ratio/step_3000"
+      },
+      "4000": {
+        "hps_abs": 0.25348428085446356,
+        "hps_drop": 0.029499593004584324,
+        "traj": 24.269516868516803,
+        "path": "outputs/stage3_blockrec/fixed_ratio/final"
+      }
+    }
+  },
+  "dval_base4b": {
+    "clip": 27.729608600616455,
+    "hps": 0.2824507375061512,
+    "fid": 61.949581146240234
+  },
+  "dval": {
+    "full": {
+      "before": {
+        "clip": 26.972899459838867,
+        "hps": 0.23687527135014533,
+        "fid": 60.16218185424805
+      },
+      "after": {
+        "clip": 27.39424838066101,
+        "hps": 0.2399248218536377
+      }
+    },
+    "no_block": {
+      "before": {
+        "clip": 27.308699853897096,
+        "hps": 0.2527995322942734,
+        "fid": 59.510189056396484
+      },
+      "after": {
+        "clip": 27.675563439369203,
+        "hps": 0.2605175571143627
+      }
+    },
+    "fixed_ratio": {
+      "before": {
+        "clip": 27.144893804550172,
+        "hps": 0.24613577180355786,
+        "fid": 59.79755783081055
+      },
+      "after": {
+        "clip": 27.678656509399413,
+        "hps": 0.25126233004033566
+      }
+    }
+  }
+}
