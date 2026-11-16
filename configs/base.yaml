@@ -9,14 +9,14 @@ paths:
   output_root: outputs
 
 data:
-  mode: online                                    # online：读 sources 原始图文并在线编码，不需要缓存；cache：读 cache_dirs
-  cache_dirs: [data/cache/laion_aes65]            # cache_dataset.py 的输出
-  sources: [data/pexels_aes/index.jsonl]          # mode=online：图片目录（xxx.jpg + xxx.txt）或 jsonl，可多个
+  mode: online                                    # online：读 sources 原始图文并在线编码，不需要缓存
+  cache_dirs: [data/cache/pexels_aes]             # 可选：仅 data.mode=cache 时读取
+  sources: [data/pexels_aes/index_train.jsonl]    # mode=online：图片目录（xxx.jpg + xxx.txt）或 jsonl，可多个
   min_aesthetic: null                             # mode=online：美学分过滤
   max_samples: null                               # mode=online：每个 source 最多取多少条
   encoder_device: null                            # mode=online：VAE / 文本编码器所在设备，默认与 device 相同（如 cuda:1）
   mix_ratios: null                                # 多个缓存目录 / source 时的采样比例，如 [0.8, 0.2]
-  max_sequence_length: 512                        # 与官方管线一致；缩短可显著降低缓存体积与显存
+  max_sequence_length: 512                        # 与官方管线一致；缩短可显著降低显存
   resolution: 512
 
 timesteps:

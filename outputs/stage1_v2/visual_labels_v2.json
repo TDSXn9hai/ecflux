@@ -1,0 +1,24 @@
+{
+  "scale": "0 无明显退化 / 1 轻微（构图、颜色或细节变化，但结构正确、无伪影）/ 2 明显退化（结构错乱、明显伪影或大面积褪色发灰）/ 3 不可辨认（噪声或纹理）",
+  "note": "v2 复现图像（samples/grid_p*.jpg 与 512px 原图）的人工标签。source=user：用户 2026-11-11 确认或修正；source=assistant：助手目测、用户未提出异议；source=inferred：按剪枝率单调性推断（不低于同组更低剪枝率）。多指多手在未剪枝 base 的 seed 42/44 上同样出现，不计为剪枝退化。",
+  "labels": {
+    "G1_r0.1": {"severity": 1, "source": "assistant", "text": "内容和构图有变化，结构基本正确"},
+    "G1_r0.2": {"severity": 2, "source": "assistant", "text": "语义偏移（塔变成楼）、物体结构错乱（皮卡车头、骑行者）"},
+    "G1_r0.3": {"severity": 3, "source": "assistant", "text": "大部分变成重复纹理 / 噪声，只剩模糊轮廓"},
+    "G2_r0.1": {"severity": 0, "source": "assistant"},
+    "G2_r0.2": {"severity": 0, "source": "assistant"},
+    "G2_r0.3": {"severity": 0, "source": "assistant", "text": "构图略变，无伪影"},
+    "G3_r0.1": {"severity": 0, "source": "assistant"},
+    "G3_r0.2": {"severity": 0, "source": "assistant"},
+    "G3_r0.3": {"severity": 0, "source": "user", "text": "构图略变；多指多手在 base seed 42/44 也出现，不是剪枝造成"},
+    "G4_r0.1": {"severity": 0, "source": "assistant"},
+    "G4_r0.2": {"severity": 1.5, "source": "user", "text": "结构开始异常：图2人脸模糊、图标混乱；图4/图5直线墙壁轮廓弯曲（多指问题 base 三个种子都有，不计）"},
+    "G4_r0.3": {"severity": 2, "source": "assistant", "text": "物体比例失真（皮卡车头放大、车身变形）"},
+    "G5_r0.1": {"severity": 1.75, "source": "user", "text": "G5 r0.2 的问题已初见端倪，接近 2 级"},
+    "G5_r0.2": {"severity": 2, "source": "user", "text": "至少 2 级：图1塔上的人无法辨认、图2人脸完全扭曲、图3鹿头扭曲"},
+    "G5_r0.3": {"severity": 2, "source": "inferred", "text": "不低于 r0.2；助手目测比 r0.2 更重，路面标线错乱"},
+    "G6_r0.1": {"severity": 0, "source": "assistant"},
+    "G6_r0.2": {"severity": 1.5, "source": "user", "text": "略有模糊、整体褪色发灰"},
+    "G6_r0.3": {"severity": 2, "source": "assistant", "text": "褪色发灰更明显"}
+  }
+}

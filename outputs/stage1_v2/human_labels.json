@@ -1,0 +1,24 @@
+{
+  "scale": "0 无明显退化 / 1 轻微 / 2 明显退化（伪影、条纹、局部结构错乱）/ 3 不可辨认（噪声，或只剩轮廓）",
+  "note": "observed = 用户在旧阶段1（梯度头判据 + 激活神经元判据，无恢复训练）生成图上的人工观察；inferred = 按剪枝率单调性推断（更低剪枝率不比已观察到的好、更高剪枝率不比已观察到的差）；null = 未描述，待看对照图后补充",
+  "labels": {
+    "G1_r0.1": {"severity": null, "source": "unknown"},
+    "G1_r0.2": {"severity": 3, "source": "observed", "text": "全是噪声"},
+    "G1_r0.3": {"severity": 3, "source": "observed", "text": "全是噪声"},
+    "G2_r0.1": {"severity": 0, "source": "inferred"},
+    "G2_r0.2": {"severity": 0, "source": "inferred"},
+    "G2_r0.3": {"severity": 0, "source": "observed", "text": "没观察到明显退化"},
+    "G3_r0.1": {"severity": 0, "source": "inferred"},
+    "G3_r0.2": {"severity": 0, "source": "observed", "text": "没有明显退化"},
+    "G3_r0.3": {"severity": 2, "source": "observed", "text": "出现明显退化"},
+    "G4_r0.1": {"severity": null, "source": "unknown"},
+    "G4_r0.2": {"severity": 3, "source": "observed", "text": "画面扭曲、结构错乱和伪影，只能看出轮廓，其他完全不可辨认"},
+    "G4_r0.3": {"severity": 3, "source": "inferred"},
+    "G5_r0.1": {"severity": null, "source": "unknown"},
+    "G5_r0.2": {"severity": 2.5, "source": "observed", "text": "与 G4 类似，主要是结构和伪影问题较大"},
+    "G5_r0.3": {"severity": 3, "source": "inferred"},
+    "G6_r0.1": {"severity": null, "source": "unknown"},
+    "G6_r0.2": {"severity": 2, "source": "observed", "text": "明显的条纹状伪影 / 噪声"},
+    "G6_r0.3": {"severity": 2, "source": "inferred"}
+  }
+}

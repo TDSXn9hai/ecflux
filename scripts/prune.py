@@ -15,7 +15,7 @@ from ecflux.data import build_train_data
 from ecflux.flux_utils import TextEncoder, load_scheduler, load_transformer, load_vae, prepare_fm_batch
 from ecflux.metrics import efficiency
 from ecflux.pruning.apra import compress
-from ecflux.pruning.evaluators import build_evaluator
+from ecflux.pruning.evaluators import DriftReference, MultiEvaluator, build_evaluator
 from ecflux.pruning.prune_ops import save_pruned_transformer
 from ecflux.utils import Tracker, count_params, get_device, get_dtype, read_prompts, save_json
 
@@ -58,28 +58,53 @@ def main():
     c = cfg["calib"]
     calib = list(itertools.islice(fm_iter(ds, c["batch_size"], device, dtype, 1234, cfg.get("timesteps"), False, **dk),
                                   c["num_batches"]))
-    recover = fm_iter(ds, cfg["recover"].get("batch_size", 1), device, dtype, cfg["seed"], cfg.get("timesteps"), **dk)
+    # recover.seed 只改恢复训练的数据顺序与噪声，评估用的 prompt / seed 保持不变（标定运行间波动用）
+    recover = fm_iter(ds, cfg["recover"].get("batch_size", 1), device, dtype, cfg["recover"].get("seed", cfg["seed"]),
+                      cfg.get("timesteps"), **dk)
 
     e = cfg["eval"]
-    if e["metric"] == "fid":
+    names = [e["metric"]] + [m for m in e.get("aux_metrics") or [] if m != e["metric"]]
+    sched = load_scheduler(cfg["paths"]["student_pipeline"])
+    samp = dict(device=device, height=e["height"], width=e["width"], steps=e["steps"],
+                guidance_scale=e["guidance_scale"], scheduler=sched, seed=cfg["seed"])
+    prompts = read_prompts(e["prompts"])
+    enc = {}
+    if {"fid", "hps", "traj_velocity_mse"} & set(names):
         # 在线数据模式下复用已加载的文本编码器（恢复训练还要用，不能 offload）
         te = encoder.te if encoder is not None else \
             TextEncoder(cfg["paths"]["student_pipeline"], device, dtype, cfg["data"]["max_sequence_length"])
-        prompts = read_prompts(e["prompts"])[: e["num_prompts"]]
-        embeds = [te.encode(prompts[i:i + 4]).cpu() for i in range(0, len(prompts), 4)]
+        for key, n in (("fid", e["num_prompts"]), ("hps", e.get("hps_prompts", 200)),
+                       ("traj_velocity_mse", e.get("traj_prompts", 16))):
+            if key in names:
+                enc[key] = [te.encode(prompts[i:i + 4]).cpu() for i in range(0, n, 4)]
         neg = te.encode([""]).cpu()
         if encoder is None:
             te.offload()
         del te
-        evaluator = build_evaluator(
-            "fid", vae=load_vae(cfg["paths"]["student_pipeline"], torch.float32, device), prompt_embeds=embeds,
-            real_images=reference_images(e["reference_dir"], e["height"]), device=device, height=e["height"],
-            width=e["width"], steps=e["steps"], guidance_scale=e["guidance_scale"], negative_embeds=neg,
-            scheduler=load_scheduler(cfg["paths"]["student_pipeline"]), seed=cfg["seed"])
-    else:
-        ev_batches = list(itertools.islice(fm_iter(ds, 1, device, dtype, 999, cfg.get("timesteps"), False, **dk),
-                                           e.get("proxy_batches", 16)))
-        evaluator = build_evaluator(e["metric"], ref_model=model, batches=ev_batches, device=device)
+    vae = load_vae(cfg["paths"]["student_pipeline"], torch.float32, device) if {"fid", "hps"} & set(names) else None
+    evaluators = {}
+    for name in names:
+        if name == "fid":
+            evaluators[name] = build_evaluator(
+                "fid", vae=vae, prompt_embeds=enc["fid"], negative_embeds=neg,
+                real_images=reference_images(e["reference_dir"], e["height"]), **samp)
+        elif name == "hps":
+            evaluators[name] = build_evaluator("hps", ref_model=model, vae=vae, prompts=prompts[: e.get("hps_prompts", 200)],
+                                               prompt_embeds=enc["hps"], negative_embeds=neg, **samp)
+        elif name == "traj_velocity_mse":
+            evaluators[name] = build_evaluator(name, ref_model=model, prompt_embeds=enc[name], negative_embeds=neg,
+                                               **samp)
+        else:
+            ev_batches = list(itertools.islice(fm_iter(ds, 1, device, dtype, 999, cfg.get("timesteps"), False, **dk),
+                                               e.get("proxy_batches", 16)))
+            evaluators[name] = build_evaluator(name, ref_model=model, batches=ev_batches, device=device)
+    drift = None
+    if e.get("drift_ref"):  # 漂移校正：与同步数恢复训练的未剪枝参照比较（scripts/drift_ref.py 生成）
+        if "traj_velocity_mse" not in names or "hps" not in names:
+            raise ValueError("eval.drift_ref 需要 traj_velocity_mse 与 hps 都在 eval.metric / aux_metrics 中")
+        drift = DriftReference(e["drift_ref"], cfg["recover"].get("steps", 2000), enc["traj_velocity_mse"], neg,
+                               **{k: v for k, v in samp.items()})
+    evaluator = evaluators[names[0]] if len(names) == 1 and drift is None else MultiEvaluator(evaluators, names[0], drift)
 
     history = compress(model, calib, recover, evaluator, cfg, tracker)
     save_pruned_transformer(model, os.path.join(out, "pruned"), extra={"history": {k: v for k, v in history.items()

@@ -4,7 +4,11 @@ calib:
   num_batches: 32                 # 重要性评估的校准 batch 数（取自缓存数据）
   batch_size: 2
 eval:
-  metric: fid                     # fid（报告设定）/ velocity_mse / flow_loss（快速代理）
+  metric: traj_velocity_mse       # fid（报告原设定）/ hps / traj_velocity_mse / velocity_mse / flow_loss；stage1_v2：FID 与人工标签不一致，改用双闸门
+  aux_metrics: [hps]              # 每次评估同时记录的辅助指标（写入 history.json 的 aux_*）；apra.gates 中的指标必须在这里或 metric 中
+  hps_prompts: 200                # hps：D_val 前 N 条 prompt
+  traj_prompts: 32                # traj_velocity_mse：D_val 前 N 条 prompt 的原始模型采样轨迹（stage1_v2 校验用 32）
+  drift_ref: outputs/stage2_v2/drift_ref  # 漂移校正参照（scripts/drift_ref.py）：额外记录 traj_ref / hps_ref；null 关闭
   prompts: data/val_prompts.txt   # D_val：1000 条 prompt
   num_prompts: 1000
   reference_dir: data/val_reference_images
@@ -33,26 +37,35 @@ prune:
   prune_ff_context: true          # 是否同时剪 Double Block 的文本流 FFN
   prune_blocks: true
 
-groups:                           # 表1；块编号 0-based（G1 = Double Block 1–2）
-  - {name: G1, double: [0, 1], single: [], init: 0.05}
-  - {name: G2, double: [2, 3], single: [], init: 0.10}
-  - {name: G3, double: [4], single: [], init: 0.15}
-  - {name: G4, double: [], single: [0, 1, 2, 3, 4, 5, 6, 7], init: 0.15}
-  - {name: G5, double: [], single: [8, 9, 10, 11, 12, 13, 14, 15], init: 0.25}
-  - {name: G6, double: [], single: [16, 17, 18, 19], init: 0.35}
+groups:                           # 块编号 0-based（G1 = Double Block 1–2）。init / max 按 stage1_v2 人工标注的敏感度重设：
+  # 无恢复训练时 G1 r0.2=2 级、G5 r0.1≈2 级、G4/G6 r0.2=1.5 级、G2/G3 r0.3 仍 0 级（开题表1原值：0.05/0.10/0.15/0.15/0.25/0.35）
+  - {name: G1, double: [0, 1], single: [], init: 0.05, max: 0.15}
+  - {name: G2, double: [2, 3], single: [], init: 0.20, max: 0.40}
+  - {name: G3, double: [4], single: [], init: 0.20, max: 0.40}
+  - {name: G4, double: [], single: [0, 1, 2, 3, 4, 5, 6, 7], init: 0.10, max: 0.30}
+  - {name: G5, double: [], single: [8, 9, 10, 11, 12, 13, 14, 15], init: 0.05, max: 0.20}
+  - {name: G6, double: [], single: [16, 17, 18, 19], init: 0.10, max: 0.30}
 
 apra:
   enabled: true                   # false -> 固定比例一次性剪枝
   rounds: 5                       # T
   feedback: global                # global（报告原式）/ per_group（逐组敏感度探测）
-  low: 0.73                       # ΔFID < low  -> γ × up（1σ，阶段0 D_val FID 种子波动 σ=0.73；开题原设 0.5）
-  high: 2.2                       # ΔFID > high -> γ × down（3σ；开题原设 2.0）
+  low: 0.73                       # 仅在未设置 gates 时使用：主指标 Δ < low -> γ × up（旧版按 FID：1σ=0.73；开题原设 0.5）
+  high: 2.2                       # 主指标 Δ > high -> γ × down（旧版 3σ；开题原设 2.0）
+  gates:                          # 双闸门（每轮 Δ，相对同步数恢复训练的未剪枝参照，即 traj_ref / hps_ref）；任一 Δ > high 回滚，全部 Δ < low 才上调
+    # 按恢复训练后的人工标注标定（outputs/stage2_v2/calib_summary.json 的 ladder，新初值 ×0.5/1/1.5/2 剪一轮 + 2000 步恢复，
+    # 用户评分 0.5 / 1 / 1.75 / 2.5）：high = 1.5 级处的线性插值（traj 15.1、HPS 0.0173），low = ×0.5 档（0–1 级）数值的一半。
+    # 按 σ 定（σ=0.21 / 0.0019）或按 stage1 无恢复尺度（8 / 0.004）都会在第 1 轮回滚。
+    traj_ref: {low: 3.45, high: 15.1}
+    hps_ref: {low: 0.004, high: 0.0173}
+  gate_offsets: {traj_ref: 6.776}  # 第 1 轮扣除的下限：不剪枝模型换恢复种子与参照 ckpt_1 的 traj 距离（HPS 下限约 0，不扣）
+  gate_cumulative: {traj_ref: 15.1, hps_ref: 0.0173}  # 细粒度阶段累计损伤上限 = 1.5 级（不含之后的块剪枝）
   up: 1.15
   down: 0.80
   mid: 1.02
   gamma_min: 0.02
   gamma_max: 0.5
-  rollback: true                  # ΔFID > high 时撤销本轮剪枝（已剪结构无法恢复，否则 γ 下调不起作用）
+  rollback: true                  # 质量变化超过 high 时撤销本轮剪枝（已剪结构无法恢复，否则 γ 下调不起作用）
   target_param_ratio: null        # 例如 0.7：DiT 参数量降到 70% 即停止
   uniform_rate: null              # 消融：所有组同一初始剪枝率
   per_group_thresholds: {}        # per_group 模式下可单独设置 low/high
@@ -67,6 +80,7 @@ block:
 recover:
   steps: 2000
   block_steps: 2000
+  seed: 42                        # 恢复训练的数据顺序 / 噪声种子（与评估种子 seed 解耦）
   lr: 1.0e-5
   warmup_steps: 50
   batch_size: 1

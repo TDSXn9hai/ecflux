@@ -10,11 +10,28 @@ import os
 
 import torch
 from _common import base_parser, init
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 from ecflux.data import ImageTextDataset
 from ecflux.flux_utils import TextEncoder, encode_images, load_vae
 from ecflux.utils import get_dtype
+
+
+class IndexedDataset(Dataset):
+    """Apply a global sample index to a subset without changing cache filenames."""
+
+    def __init__(self, dataset: Dataset, indices: list[int]):
+        self.dataset = dataset
+        self.indices = indices
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, position: int) -> dict:
+        index = self.indices[position]
+        item = self.dataset[index]
+        item["_index"] = index
+        return item
 
 
 def main():
@@ -28,6 +45,10 @@ def main():
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--max_sequence_length", type=int, default=512)
     p.add_argument("--shard_size", type=int, default=1000)
+    p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--shard_id", type=int, default=0)
+    p.add_argument("--num_shards", type=int, default=1)
     p.add_argument("--dtype", default="bf16")
     p.add_argument("--device", default="cuda")
     args = p.parse_args()
@@ -37,34 +58,66 @@ def main():
     if args.stage == "teacher_text":
         te = TextEncoder(args.pipeline, args.device, dtype, args.max_sequence_length)
         files = sorted(glob.glob(os.path.join(args.out, "**", "*.pt"), recursive=True))
+        files = [
+            path for index, path in enumerate(files)
+            if index % args.num_shards == args.shard_id
+        ]
+        todo = []
+        for f in files:
+            d = torch.load(f, map_location="cpu", weights_only=False)
+            if args.overwrite or "teacher_prompt_embeds" not in d:
+                todo.append(f)
         for i in range(0, len(files), args.batch_size):
-            chunk = files[i:i + args.batch_size]
+            chunk = todo[i:i + args.batch_size]
+            if not chunk:
+                continue
             items = [torch.load(f, weights_only=False) for f in chunk]
             emb = te.encode([d["caption"] for d in items]).cpu()
             for f, d, e in zip(chunk, items, emb):
-                d["teacher_prompt_embeds"] = e.to(dtype)
+                d["teacher_prompt_embeds"] = e.to(dtype).clone()
                 torch.save(d, f)
-        print(f"added teacher_prompt_embeds to {len(files)} samples")
+        print(f"added teacher_prompt_embeds to {len(todo)} samples")
         return
 
     ds = ImageTextDataset(args.source, args.resolution, args.min_aesthetic, args.max_samples)
-    print(f"{len(ds)} image-text pairs")
+    existing_paths = [] if args.overwrite else glob.glob(os.path.join(args.out, "**", "*.pt"), recursive=True)
+    existing = {int(os.path.splitext(os.path.basename(path))[0]) for path in existing_paths}
+    indices = [
+        index for index in range(len(ds))
+        if index % args.num_shards == args.shard_id and index not in existing
+    ]
+    print(
+        f"{len(indices)} image-text pairs remaining "
+        f"(source={len(ds)}, shard={args.shard_id}/{args.num_shards}, existing={len(existing)})"
+    )
+    if not indices:
+        return
+    indexed = IndexedDataset(ds, indices)
     vae = load_vae(args.pipeline, torch.float32, args.device)
     te = TextEncoder(args.pipeline, args.device, dtype, args.max_sequence_length)
-    dl = DataLoader(ds, batch_size=args.batch_size, num_workers=4,
+    dl = DataLoader(indexed, batch_size=args.batch_size, num_workers=args.num_workers,
                     collate_fn=lambda b: {"pixel_values": torch.stack([x["pixel_values"] for x in b]),
-                                          "caption": [x["caption"] for x in b]})
-    idx = 0
+                                          "caption": [x["caption"] for x in b],
+                                          "index": [x["_index"] for x in b]})
+    done = 0
     for batch in dl:
         lat = encode_images(vae, batch["pixel_values"]).cpu()
         emb = te.encode(batch["caption"]).cpu()
-        for j, cap in enumerate(batch["caption"]):
+        for j, (idx, cap) in enumerate(zip(batch["index"], batch["caption"])):
             shard = os.path.join(args.out, f"{idx // args.shard_size:05d}")
             os.makedirs(shard, exist_ok=True)
-            d = {"latents": lat[j].to(dtype), "prompt_embeds": emb[j].to(dtype), "caption": cap}
+            # clone() is required: slice views otherwise serialize the whole batch
+            # storage in every .pt file (31 MB instead of ~2.2 MB for L=128).
+            d = {
+                "latents": lat[j].to(dtype).clone(),
+                "prompt_embeds": emb[j].to(dtype).clone(),
+                "caption": cap,
+            }
             torch.save(d, os.path.join(shard, f"{idx:08d}.pt"))
-            idx += 1
-    print(f"cached {idx} samples -> {args.out}")
+            done += 1
+        if done % (args.batch_size * 10) < args.batch_size:
+            print(f"cached +{done}/{len(indices)} samples -> {args.out}", flush=True)
+    print(f"cached +{done}/{len(indices)} samples -> {args.out}")
 
 
 if __name__ == "__main__":

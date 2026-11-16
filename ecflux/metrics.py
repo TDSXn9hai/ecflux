@@ -14,6 +14,9 @@ class ClipScorer:
     def __init__(self, model_name="openai/clip-vit-large-patch14", device="cuda"):
         from transformers import CLIPModel, CLIPProcessor
 
+        local = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights", "clip-vit-large-patch14")
+        if model_name == "openai/clip-vit-large-patch14" and os.path.isdir(local):
+            model_name = local
         self.model = CLIPModel.from_pretrained(model_name).to(device).eval()
         self.proc = CLIPProcessor.from_pretrained(model_name)
         self.device = device
@@ -27,17 +30,50 @@ class ClipScorer:
 
 
 class HPSv2Scorer:
-    """依赖官方 hpsv2 包（pip install hpsv2）；首次调用自动下载 HPS v2.1 权重。"""
+    """HPS v2.1（官方 hpsv2 包的模型与预处理）。官方 img_score.score 每次调用都会重新 torch.load 整个 checkpoint，
+    逐张打 1000 张图要几十分钟；这里只加载一次并按 batch 计算，结果与官方逐张打分一致（同为 amp 下的图文内积）。"""
 
-    def __init__(self, version="v2.1"):
-        import hpsv2  # noqa: F401
+    def __init__(self, version="v2.1", device="cuda", batch_size=16):
+        import sys
+        import types
 
-        self.version = version
+        # hpsv2 1.2.0 vendors an unused ``from turtle import forward`` that
+        # requires tkinter.  Provide a tiny shim so headless servers can import it.
+        if "turtle" not in sys.modules:
+            turtle = types.ModuleType("turtle")
+            turtle.forward = lambda *args, **kwargs: None
+            sys.modules["turtle"] = turtle
+        from hpsv2.src.open_clip import create_model_and_transforms, get_tokenizer
 
+        checkpoint = os.environ.get("HPSV2_CHECKPOINT") or os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "weights", "hpsv2", "HPS_v2.1_compressed.pt")
+        if not os.path.isfile(checkpoint):
+            import huggingface_hub
+            from hpsv2.utils import hps_version_map
+
+            checkpoint = huggingface_hub.hf_hub_download("xswu/HPSv2", hps_version_map[version])
+        # HPSv2.1_compressed.pt already contains the complete fine-tuned state_dict;
+        # skip the redundant OpenCLIP base weights (architecture is fully specified by ``ViT-H-14``).
+        model, _, self.preprocess = create_model_and_transforms(
+            "ViT-H-14", None, precision="amp", device=device, jit=False, force_quick_gelu=False,
+            force_custom_text=False, force_patch_dropout=False, force_image_size=None, pretrained_image=False,
+            image_mean=None, image_std=None, light_augmentation=True, aug_cfg={}, output_dict=True,
+            with_score_predictor=False, with_region_predictor=False)
+        model.load_state_dict(torch.load(checkpoint, map_location=device)["state_dict"])
+        self.model = model.to(device).eval()
+        self.tokenizer = get_tokenizer("ViT-H-14")
+        self.device, self.version, self.batch_size = device, version, batch_size
+
+    @torch.no_grad()
     def __call__(self, images, prompts) -> list[float]:
-        import hpsv2
-
-        return [float(hpsv2.score(img, p, hps_version=self.version)[0]) for img, p in zip(images, prompts)]
+        out = []
+        for i in range(0, len(images), self.batch_size):
+            img = torch.stack([self.preprocess(x) for x in images[i:i + self.batch_size]]).to(self.device)
+            txt = self.tokenizer(list(prompts[i:i + self.batch_size])).to(self.device)
+            with torch.autocast("cuda"):
+                o = self.model(img, txt)
+                out += (o["image_features"] * o["text_features"]).sum(-1).float().cpu().tolist()
+        return out
 
 
 def square_resize(img, size: int):

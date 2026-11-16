@@ -35,6 +35,9 @@ class ImageTextDataset(Dataset):
         from torchvision import transforms
 
         self.items = []
+        index_jsonl = os.path.join(source, "index.jsonl")
+        if os.path.isdir(source) and os.path.isfile(index_jsonl):
+            source = index_jsonl
         if source.endswith(".jsonl"):
             base = os.path.dirname(source)
             with open(source, encoding="utf-8") as f:

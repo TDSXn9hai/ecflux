@@ -48,11 +48,14 @@ def main():
         if "hps" in a.metrics:
             scorers["hps"] = HPSv2Scorer()
         per = {}
-        for r in index:
-            img = Image.open(r["path"]).convert("RGB")
-            d = per.setdefault(r["idx"], {"prompt": r["prompt"]})
-            for name, s in scorers.items():
-                d.setdefault(name, []).append(s([img], [r["prompt"]])[0])
+        for i in range(0, len(index), 16):
+            chunk = index[i:i + 16]
+            imgs, ps = [Image.open(r["path"]).convert("RGB") for r in chunk], [r["prompt"] for r in chunk]
+            scores = {name: s(imgs, ps) for name, s in scorers.items()}
+            for j, r in enumerate(chunk):
+                d = per.setdefault(r["idx"], {"prompt": r["prompt"]})
+                for name in scorers:
+                    d.setdefault(name, []).append(scores[name][j])
         rows = []
         for idx in sorted(per):
             d = per[idx]

@@ -1,4 +1,6 @@
-"""LAION-Aesthetics 6.5+ 的替代训练集：i1 Pexels 512px (1M) 上用 LAION 美学预测器 v2 打分，取高分子集。
+"""LAION-Aesthetics 6.5+ 的替代训练集：i1 Pexels (1M) 上用 LAION 美学预测器 v2 打分，取高分子集。
+
+上游当前卡片的 TFRecord 实际为 256x256，尽管仓库名仍含 512-resolution。
 
 python data/prepare_pexels_aes.py score  --src data/raw/i1_pexels_512 --out data/raw/i1_pexels_512_scores
 python data/prepare_pexels_aes.py export --src data/raw/i1_pexels_512 --scores data/raw/i1_pexels_512_scores \
@@ -134,14 +136,19 @@ def score(a):
 
     os.makedirs(a.out, exist_ok=True)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    clip = CLIPModel.from_pretrained("openai/clip-vit-large-patch14", torch_dtype=torch.float16).to(dev).eval()
+    local_clip = os.path.join(ROOT, "weights", "clip-vit-large-patch14")
+    clip_model = local_clip if os.path.isdir(local_clip) else "openai/clip-vit-large-patch14"
+    clip = CLIPModel.from_pretrained(clip_model, torch_dtype=torch.float16).to(dev).eval()
     mlp = AestheticMLP()
     mlp.load_state_dict(torch.load(os.path.join(ROOT, "weights/aesthetic/sac+logos+ava1-l14-linearMSE.pth"), map_location="cpu"))
     mlp = mlp.to(dev).eval()
     done = set()
     with Pool(a.workers) as pool:
         while True:
-            shards = sorted(glob.glob(os.path.join(a.src, "dataset-train.tfrecord-*")))
+            shards = sorted(
+                p for p in glob.glob(os.path.join(a.src, "dataset-train.tfrecord-*"))
+                if os.path.isfile(p) and not p.endswith(".tmp")
+            )
             todo = [s for s in shards if os.path.basename(s) not in done
                     and not os.path.exists(os.path.join(a.out, os.path.basename(s) + ".jsonl"))]
             if not todo:
@@ -183,6 +190,8 @@ def export(a):
     rows = []
     for p in sorted(glob.glob(os.path.join(a.scores, "*.jsonl"))):
         shard = os.path.basename(p)[:-6]
+        if not os.path.isfile(os.path.join(a.src, shard)):
+            continue
         with open(p, encoding="utf-8") as f:
             rows += [dict(json.loads(l), shard=shard) for l in f]
     rows = [r for r in rows if any(c.strip() for c in r["captions"])]

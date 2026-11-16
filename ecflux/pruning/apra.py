@@ -12,6 +12,10 @@ for t in 1..T:
     feedback=global    -> 报告原始设定，全局 ΔQ 驱动所有组
     feedback=per_group -> 每组单独探测剪枝敏感度，按组调节（各组差异化）
     rollback=true      -> ΔQ > high 时撤销本轮剪枝
+    gates={指标: {low, high}} -> 多指标闸门（需 MultiEvaluator）：任一指标 Δ > high 判为超标（γ 下调 / 回滚），
+                         全部指标 Δ < low 才上调 γ；未设置时用主指标与 apra.low / high
+    gate_offsets={指标: v}  -> 第 1 轮 Δ 先扣除的下限（漂移参照本身的距离）
+    gate_cumulative={指标: c} -> 相对初始（扣下限后）的累计值超过 c 也判为超标
 """
 
 import copy
@@ -66,13 +70,21 @@ def flow_finetune(model, batch_iter, steps: int, cfg: dict, tracker=None, tag="r
     del opt
 
 
-def _update_rate(rate, delta, acfg, gmin, gmax):
+def _status(delta, acfg, deltas=None) -> str:
+    """本轮质量变化归类为 low / mid / high。gates 设置时按多指标闸门判断，否则按主指标与 apra.low / high。"""
+    gates = acfg.get("gates")
+    if gates and deltas is not None:
+        if any(deltas[m] > g["high"] for m, g in gates.items()):
+            return "high"
+        return "low" if all(deltas[m] < g["low"] for m, g in gates.items()) else "mid"
     if delta < acfg.get("low", 0.5):
-        rate = rate * acfg.get("up", 1.15)
-    elif delta > acfg.get("high", 2.0):
-        rate = rate * acfg.get("down", 0.80)
-    else:
-        rate = rate * acfg.get("mid", 1.02)
+        return "low"
+    return "high" if delta > acfg.get("high", 2.0) else "mid"
+
+
+def _update_rate(rate, delta, acfg, gmin, gmax, status=None):
+    status = status or _status(delta, acfg)
+    rate = rate * acfg.get({"low": "up", "high": "down", "mid": "mid"}[status], {"low": 1.15, "high": 0.80, "mid": 1.02}[status])
     return float(min(max(rate, gmin), gmax))
 
 
@@ -113,19 +125,42 @@ def compress(model, calib_batches, recover_iter, evaluator, cfg: dict, tracker=N
     init_unit_meta(model)
 
     block_stage = bcfg.get("stage", "after") if pcfg.get("prune_blocks", True) else "none"
+    trained = [0]  # 累计恢复训练步数（回滚时一并恢复），供漂移校正参照对齐 checkpoint
+
+    def evaluate():
+        if hasattr(evaluator, "set_trained_steps"):
+            evaluator.set_trained_steps(trained[0])
+        return evaluator(model)
 
     def do_block_stage():
         imp = collect_importance(model, calib_batches, {**pcfg, "head_metric": "magnitude",
                                                          "neuron_metric": "magnitude", "modality_aware": False})
         removed = prune_blocks(model, imp["block_sim"], bcfg)
-        flow_finetune(model, recover_iter, rcfg.get("block_steps", rcfg.get("steps", 2000)), rcfg, tracker, "block")
+        steps = rcfg.get("block_steps", rcfg.get("steps", 2000))
+        flow_finetune(model, recover_iter, steps, rcfg, tracker, "block")
+        trained[0] += steps
         history["removed_single_blocks"] = removed
 
     if block_stage == "before":
         do_block_stage()
 
-    score_prev = evaluator(model)
+    score_prev = evaluate()
     history["score_0"] = score_prev
+    aux_prev = None
+    if hasattr(evaluator, "last"):  # MultiEvaluator：同时记录辅助指标
+        history["aux_0"] = dict(evaluator.last)
+        aux_prev = history["aux_0"]
+    gates = acfg.get("gates")
+    if gates and aux_prev is None:
+        raise ValueError("apra.gates 需要 eval.aux_metrics 提供闸门里的全部指标")
+    offsets = acfg.get("gate_offsets") or {}
+    if gates and offsets and aux_prev.get("ref_ckpt", 0) == 0:
+        # 漂移参照的误差下限：两次独立恢复训练之间本身就有距离，第 1 轮的 Δ 要先扣掉
+        # （block.stage=before 时初始评估已在恢复训练之后，下限已包含在初始值里，不再扣）
+        aux_prev = {**aux_prev, **{m: aux_prev[m] + v for m, v in offsets.items()}}
+        history["gate_baseline"] = {m: aux_prev[m] for m in gates}
+    base0 = dict(aux_prev) if gates else None
+    caps = acfg.get("gate_cumulative") or {}
     logger.info(f"[APRA] initial score={score_prev:.4f} params={n0 / 1e6:.2f}M")
     rounds = int(acfg.get("rounds", 5)) if acfg.get("enabled", True) else 1
     target = acfg.get("target_param_ratio")  # 例如 0.7：参数量降到原始的 70% 即停止
@@ -147,25 +182,44 @@ def compress(model, calib_batches, recover_iter, evaluator, cfg: dict, tracker=N
         if acfg.get("rollback", False):
             snapshot = _snapshot(model)
         layer_report = prune_to_rates(model, importance, rates, groups, pcfg) if importance else {}
+        trained_before = trained[0]
         flow_finetune(model, recover_iter, rcfg.get("steps", 2000), rcfg, tracker, f"recover_r{t}")
-        score = evaluator(model)
+        trained[0] += rcfg.get("steps", 2000)
+        score = evaluate()
         delta = score - score_prev
         n = count_params(model)
         rec = {"round": t, "rates": dict(rates), "score": score, "delta": delta, "params": n,
-               "param_ratio": n / n0, "layers": layer_report}
+               "param_ratio": n / n0, "layers": layer_report, "trained_steps": trained[0]}
+        deltas = None
+        if hasattr(evaluator, "last"):
+            rec["aux"] = dict(evaluator.last)
+            if gates:
+                deltas = {m: rec["aux"][m] - aux_prev[m] for m in gates}
+                rec["gate_deltas"] = deltas
+        status = _status(delta, acfg, deltas)
+        if caps and deltas is not None:
+            # 累计上限：每轮 Δ 只约束单轮增量，剪枝率逐轮 ×1.15 时累计损伤可能越过可接受水平
+            cum = {m: rec["aux"][m] - base0[m] for m in caps}
+            rec["gate_cumulative"] = cum
+            if any(cum[m] > c for m, c in caps.items()):
+                status = "high"
+        rec["status"] = status
         logger.info(f"[APRA] round {t}: score={score:.4f} Δ={delta:+.4f} params={n / 1e6:.2f}M ({n / n0:.3f})")
         if tracker:
             tracker.log({"apra/score": score, "apra/delta": delta, "apra/param_ratio": n / n0,
                          **{f"apra/gamma_{k}": v for k, v in rates.items()}}, step=t)
 
         if acfg.get("enabled", True) and acfg.get("feedback", "global") == "global":
-            rates = {g: _update_rate(r, delta, acfg, *bounds[g]) for g, r in rates.items()}
-        rejected = snapshot is not None and delta > acfg.get("high", 2.0)
+            rates = {g: _update_rate(r, delta, acfg, *bounds[g], status=status) for g, r in rates.items()}
+        rejected = snapshot is not None and status == "high"
         if rejected:
             _restore(model, snapshot)
-            logger.info(f"[APRA] round {t} rejected (Δ>{acfg.get('high', 2.0)}), rolled back")
+            trained[0] = trained_before
+            logger.info(f"[APRA] round {t} rejected ({deltas if deltas is not None else delta}), rolled back")
         else:
             score_prev = score
+            if deltas is not None:
+                aux_prev = rec["aux"]
         rec["rejected"] = rejected
         history["rounds"].append(rec)
 
@@ -178,7 +232,10 @@ def compress(model, calib_batches, recover_iter, evaluator, cfg: dict, tracker=N
 
     if block_stage == "after":
         do_block_stage()
-    history["final_score"] = evaluator(model)
+    history["final_score"] = evaluate()
+    history["trained_steps"] = trained[0]
+    if hasattr(evaluator, "last"):
+        history["aux_final"] = dict(evaluator.last)
     history["params_final"] = count_params(model)
     history["final_rates"] = rates
     history["structure"] = prune_ops.structure_spec(model)

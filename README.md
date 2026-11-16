@@ -40,13 +40,21 @@ tests/                 smoke_test.py（库级）、smoke_scripts.py（脚本级�
 ## 1. 环境
 
 ```bash
-conda create -n ecflux python=3.11 -y && conda activate ecflux
+python3.11 -m venv .venv && source .venv/bin/activate
 # 先装与 CUDA 匹配的 torch/torchvision（示例为 CUDA 13.0）
 pip install torch==2.14.1 torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cu130
 pip install -r requirements.txt
 ```
 
-硬件按报告设定为单卡 RTX 4090 24GB，显存优化靠 Gradient Checkpointing、AdamW 8-bit 和 bf16/fp16 混合精度。代码要求 Python ≥ 3.10、diffusers ≥ 0.37。报告里写的 diffusers 0.30+ 还没有 FLUX.2 Klein 的类，不能用。
+Python 3.10 也可运行（NumPy 使用 2.2.x）。硬件按报告设定为单卡 RTX 4090 24GB，显存优化靠 Gradient Checkpointing、AdamW 8-bit 和 bf16/fp16 混合精度。代码要求 Python ≥ 3.10、diffusers ≥ 0.37。报告里写的 diffusers 0.30+ 还没有 FLUX.2 Klein 的类，不能用。
+
+内网下载可设置：
+
+```bash
+export https_proxy=http://agent.baidu.com:8891
+export http_proxy=$https_proxy
+export HF_ENDPOINT=https://hf-mirror.com
+```
 
 ## 2. 权重
 
@@ -55,6 +63,13 @@ bash scripts/download_weights.sh student   # 4B 管线 ≈ 16GB（已下载）
 bash scripts/download_weights.sh eval      # CLIP / HPSv2.1 / OpenCLIP ViT-H / FID Inception ≈ 7.4GB（已下载）
 bash scripts/download_weights.sh teacher   # 9B 管线 ≈ 35GB，gated，需先授权（见下）
 export HF_HOME=$PWD/weights/hf_home TORCH_HOME=$PWD/weights/torch_home   # 评估脚本运行前设置，评估模型缓存在这里
+```
+
+- Hugging Face 单流在慢代理下容易卡住时，可使用分块、断点续传、SHA256 校验的下载器。ModelScope 镜像无需 9B gated 授权：
+
+```bash
+python scripts/download_hf.py modelscope model black-forest-labs/FLUX.2-klein-base-4B \
+    --local-dir weights/FLUX.2-klein-base-4B --workers 48
 ```
 
 - 评估模型的缓存放在 `weights/hf_home` 和 `weights/torch_home`。系统盘 `/` 只剩约 3GB，不要用默认的 `~/.cache`。
@@ -72,25 +87,32 @@ export HF_HOME=$PWD/weights/hf_home TORCH_HOME=$PWD/weights/torch_home   # 评�
 
 ## 3. 数据准备
 
-默认 `data.mode=online`：`prune.py` / `distill.py`（`teacher.mode=online`）直接读取 `data.sources` 中的原始图文（目录或 jsonl），训练时在线做 VAE 与文本编码，不需要下面的缓存步骤，也不占缓存磁盘。代价是要额外加载 VAE + Qwen3-4B（9B 教师还要 Qwen3-8B）文本编码器，每个 batch 多一次编码前向；显存不够时用 `--set data.encoder_device=cuda:1` 把编码器放到另一张卡。
+`configs/base.yaml` 默认 `data.mode=online`：`prune.py` / `distill.py`（`teacher.mode=online`）直接读取 `data.sources` 中的原始图文，训练时在线做 VAE 与文本编码，不占缓存磁盘。代价是训练时要额外加载冻结的 VAE 与 Qwen3 文本编码器；显存不够时用 `--set data.encoder_device=cuda:1` 把编码器放到另一张卡。
 ```bash
-python scripts/prune.py --config configs/prune.yaml --out outputs/prune/full --set "data.sources=[data/pexels_aes/index.jsonl]"
+python scripts/prune.py --config configs/prune.yaml --out outputs/prune/full --set "data.sources=[data/pexels_aes/index_train.jsonl]"
 ```
 `teacher.mode=offline`（`cache_teacher.py`）本身就是缓存方案，仍需 `data.mode=cache`。
 
-以下为 `data.mode=cache` 的流程。报告设定：从 LAION-Aesthetics V2 6.5+ 中选约 15 万对图文，提前缓存 VAE latent 和文本嵌入。
+报告原设定是从 LAION-Aesthetics V2 6.5+ 中选约 15 万对图文；LAION 不可用时使用 **Pexels AES**：对 i1 Pexels 数据用同一 LAION 美学预测器打分并取高分子集。注意上游仓库名仍含 `512-resolution`，但当前数据卡与特征元数据实际为 256×256；训练配置会按 512 上采样。默认在线编码，不需要执行下面的缓存流程。
 
 ```bash
-# (1) 用 img2dataset 下载为 「xxx.jpg + xxx.txt (+ xxx.json)」 目录格式，或者准备 jsonl：{"image":..., "caption":..., "aesthetic":...}
-# (2) 缓存学生侧 latents + Qwen3-4B 嵌入
-python scripts/cache_dataset.py --source data/laion_aes65 --out data/cache/laion_aes65 \
-    --pipeline weights/FLUX.2-klein-base-4B --resolution 512 --min_aesthetic 6.5 --max_samples 150000
-# (3) 9B 教师使用 Qwen3-8B，嵌入维度不同，需要额外缓存教师文本嵌入
-python scripts/cache_dataset.py --stage teacher_text --out data/cache/laion_aes65 --pipeline weights/FLUX.2-klein-base-9B
-# (4) 约 20% 的教师合成样本：先用教师生成图片，再按上面两步缓存为第二个目录
+# (1) 下载 Pexels TFRecord 分片（可断点续传）
+python scripts/download_hf.py modelscope dataset zlab-princeton/i1-pexels-tfrecord \
+    --local-dir data/raw/i1_pexels_512 --workers 48
+# (2) LAION 美学打分并导出高分 15 万对
+python data/prepare_pexels_aes.py score --src data/raw/i1_pexels_512 --out data/raw/i1_pexels_512_scores
+python data/prepare_pexels_aes.py export --src data/raw/i1_pexels_512 \
+    --scores data/raw/i1_pexels_512_scores --out data/pexels_aes --num 150000
+# (3) 可选：缓存学生侧 latents + Qwen3-4B 嵌入（可断点续传）
+python scripts/cache_dataset.py --source data/pexels_aes --out data/cache/pexels_aes \
+    --pipeline weights/FLUX.2-klein-base-4B --resolution 512 --max_sequence_length 128 --max_samples 150000
+# (4) 9B 教师使用 Qwen3-8B，嵌入维度不同，需要额外缓存教师文本嵌入
+python scripts/cache_dataset.py --stage teacher_text --out data/cache/pexels_aes \
+    --pipeline weights/FLUX.2-klein-base-9B --max_sequence_length 128
+# (5) 约 20% 的教师合成样本：先用教师生成图片，再按上面两步缓存为第二个目录
 python scripts/generate.py --pipeline weights/FLUX.2-klein-base-9B --prompts data/synth_prompts.txt --out data/teacher_synth
 #     generate.py 输出 index.jsonl，可整理成 {"image","caption"} jsonl 后交给 cache_dataset.py
-#     训练时：--set "data.cache_dirs=[data/cache/laion_aes65,data/cache/teacher_synth]" "data.mix_ratios=[0.8,0.2]"
+#     训练时：--set "data.cache_dirs=[data/cache/pexels_aes,data/cache/teacher_synth]" "data.mix_ratios=[0.8,0.2]"
 ```
 
 磁盘估算（单样本，bf16）：512px latent 为 128×32×32×2B ≈ 256KB；文本嵌入为 L×7680×2B，L=512 时约 7.5MB。15 万样本全长缓存需要 1TB 以上。建议用 `--max_sequence_length 128~256` 缩短，同时把 `data.max_sequence_length` 设成同一个值。

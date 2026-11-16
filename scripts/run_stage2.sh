@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# 阶段2：剪枝主实验 + 核心消融（只用 GPU2/GPU3）。每个实验一个目录 outputs/stage2/<name>/，已完成的自动跳过；
+# 阶段2 v2：剪枝主实验 + 核心消融（默认用 GPU1-3）。每个实验一个目录 outputs/stage2_v2/<name>/，已完成的自动跳过；
 # 开始前在 <name>/.claim 占位，多张卡同时跑同一模式时不会重复执行同一实验（失败会删除占位以便重试）。
-#   GPU=2 bash scripts/run_stage2.sh main      # Ours-PruneOnly 主实验（APRA + FID 反馈 + 块剪枝）
+# APRA 反馈为双闸门（轨迹速度场 MSE + HPSv2 200 条，见 configs/prune.yaml 的 eval / apra.gates，依据 outputs/stage1_v2）。
+#   GPUS="1 2 3" bash scripts/run_stage2.sh calib  # 阈值标定：新初值剪一轮 + 2000 步恢复，recover.seed=1/2/3 各一次（并行）
+#   GPU=1 bash scripts/run_stage2.sh drift     # 漂移校正参照（scripts/drift_ref.py），其余实验的每轮评估会等待对应 checkpoint
+#   GPU=1 bash scripts/run_stage2.sh main      # Ours-PruneOnly 主实验（APRA 双闸门 + 块剪枝）+ 换恢复种子的重复运行 full_rep
 #   GPU=3 bash scripts/run_stage2.sh indep     # 不依赖主实验结果的消融：粒度 / 重要性判据 / 模态感知
 #   GPU=2 bash scripts/run_stage2.sh matched   # 依赖主实验参数量的消融：固定比例一次性剪枝 / 统一剪枝率（参数量对齐）
 #   GPU=3 bash scripts/run_stage2.sh block     # 块剪枝时机与 τ（优先级最低）
-#   GPU=2 bash scripts/run_stage2.sh queue     # 依次执行 matched、indep、block（两张卡各起一个即可并行分担）
+#   GPU=2 bash scripts/run_stage2.sh queue     # 依次执行 indep、block、matched（多张卡各起一个即可并行分担；full 未完成时跳过 matched）
 #   GPU=2 bash scripts/run_stage2.sh eval      # 对所有已完成实验在 D_val 上生成并评估 FID / CLIP / HPSv2
-#   GPU=2 bash scripts/run_stage2.sh summary   # 汇总成 outputs/stage2/summary.md
+#   bash scripts/run_stage2.sh summary         # 汇总成 outputs/stage2_v2/summary.md 并画图（scripts/plot_stage2.py）
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export CUDA_MODULE_LOADING=LAZY
 export HF_HOME=$PWD/weights/hf_home TORCH_HOME=$PWD/weights/torch_home HF_HUB_OFFLINE=1
-PY=${PY:-../.venv/bin/python}
-GPU=${GPU:-2}
-OUT=outputs/stage2
+PY=${PY:-.venv/bin/python}
+GPU=${GPU:-1}
+OUT=${OUT:-outputs/stage2_v2}
 P=configs/prune.yaml
 PIPE=weights/FLUX.2-klein-base-4B
 TARGET=${TARGET:-0.75}   # 细粒度阶段的目标参数比例；之后块剪枝再删约 3 个 Single Block，最终约 0.65（≈2.5B，开题设定）
@@ -49,8 +52,8 @@ dry_ratio() {
   local d=$OUT/_dry_gpu$GPU
   rm -rf "$d"
   CUDA_VISIBLE_DEVICES=$GPU $PY scripts/prune.py --config $P --out "$d" --set "groups=$1" apra.enabled=false \
-    prune.prune_blocks=false recover.steps=0 eval.metric=velocity_mse eval.proxy_batches=1 calib.num_batches=8 \
-    prune.head_ablation_batches=2 > /dev/null 2>&1
+    prune.prune_blocks=false recover.steps=0 eval.metric=velocity_mse "eval.aux_metrics=[]" apra.gates=null \
+    eval.proxy_batches=1 calib.num_batches=8 prune.head_ablation_batches=2 > /dev/null 2>&1
   $PY -c "import json; print(json.load(open('$d/history.json'))['rounds'][0]['param_ratio'])"
 }
 
@@ -80,8 +83,39 @@ match_groups() {
   groups_yaml "$mode" "$($PY -c "print(($lo + $hi) / 2)")"
 }
 
+if [[ $WHAT == calib ]]; then
+  GPUS=(${GPUS:-1 2 3}); s=1
+  for g in "${GPUS[@]}"; do
+    ( GPU=$g; run_prune calib_seed$s apra.rounds=1 apra.rollback=false apra.target_param_ratio=null \
+        prune.prune_blocks=false recover.seed=$s ) &
+    s=$((s + 1))
+  done
+  wait
+  $PY - <<'PYEOF'
+import glob, json, statistics as st
+rows = []
+for d in sorted(glob.glob("outputs/stage2_v2/calib_seed*/history.json")):
+    r = json.load(open(d))["rounds"][0]
+    rows.append({"run": d.split("/")[-2], "param_ratio": r["param_ratio"], "traj_velocity_mse": r["aux"]["traj_velocity_mse"],
+                 "hps": r["aux"]["hps"], "hps_abs": r["aux"]["hps_abs"]})
+out = {"rows": rows}
+if len(rows) >= 2:
+    sd = {m: st.stdev([x[m] for x in rows]) for m in ("traj_velocity_mse", "hps")}
+    out |= {"sigma": sd, "suggested_gates": {m: {"low": sd[m], "high": 3 * sd[m]} for m in sd}}
+json.dump(out, open("outputs/stage2_v2/calib_summary.json", "w"), indent=2)
+print(json.dumps(out, indent=2))
+PYEOF
+fi
+
+if [[ $WHAT == drift ]]; then
+  # 漂移校正参照：不剪枝、按恢复训练设置连续训练 6 × 2000 步，每段一个 checkpoint（APRA 在 eval.drift_ref 中等待使用）
+  mkdir -p $OUT/drift_ref
+  CUDA_VISIBLE_DEVICES=$GPU $PY scripts/drift_ref.py --config $P --out $OUT/drift_ref --chunks 6 > $OUT/drift_ref/run.log 2>&1
+fi
+
 if [[ $WHAT == main ]]; then
   run_prune full
+  run_prune full_rep recover.seed=43   # 只换恢复训练种子，估计整条 APRA 流程的运行间波动
 fi
 
 if [[ $WHAT == indep || $WHAT == queue ]]; then
@@ -98,8 +132,15 @@ if [[ $WHAT == indep || $WHAT == queue ]]; then
   run_prune no_modality  prune.modality_aware=false
 fi
 
-if [[ $WHAT == matched || $WHAT == queue ]]; then
-  [[ -f $OUT/full/history.json ]] || { echo "need $OUT/full first"; exit 1; }
+if [[ $WHAT == block || $WHAT == queue ]]; then
+  run_prune block_before block.stage=before
+  # max_blocks 放开到 6：旧版删块数被 max_blocks=4 截住，τ 在 0.88–0.94 内不起作用
+  for TAU in 0.88 0.90 0.94; do run_prune tau_$TAU block.tau=$TAU block.max_blocks=6; done
+fi
+
+if [[ $WHAT == matched || $WHAT == queue ]] && [[ ! -f $OUT/full/history.json ]]; then
+  echo "need $OUT/full first, skip matched"
+elif [[ $WHAT == matched || $WHAT == queue ]]; then
   T=$(fine_ratio full)
   echo "main fine-stage param ratio: $T"
   # 只有一轮，rollback 必须关闭，否则这一轮超阈值时会被撤回、只剩块剪枝
@@ -113,14 +154,10 @@ if [[ $WHAT == matched || $WHAT == queue ]]; then
   rm -rf "$OUT/_dry_gpu$GPU"
 fi
 
-if [[ $WHAT == block || $WHAT == queue ]]; then
-  run_prune block_before block.stage=before
-  for TAU in 0.88 0.90 0.94; do run_prune tau_$TAU block.tau=$TAU; done
-fi
-
 if [[ $WHAT == eval ]]; then
   for d in $OUT/*/; do
     n=$(basename "$d"); [[ -f $d/pruned/prune_spec.json ]] || continue
+    [[ $n == calib_* || $n == _dry* ]] && continue   # 标定运行只用于估计阈值
     [[ -f $d/eval_dval/summary.json ]] && continue
     mkdir "$d/.eval_claim" 2>/dev/null || continue   # 另一张卡正在评估
     [[ -f $d/gen_dval/index.jsonl ]] || CUDA_VISIBLE_DEVICES=$GPU $PY scripts/generate.py --pipeline $PIPE \
@@ -136,23 +173,5 @@ if [[ $WHAT == eval ]]; then
 fi
 
 if [[ $WHAT == summary ]]; then
-  $PY - <<'PYEOF'
-import glob, json, os
-base_fid = json.load(open("outputs/stage0/fidvar/summary.json"))["fid"]["42"]
-rows = ["| 实验 | DiT 参数 | 参数比例 | 删除的 Single Block | D_val FID (Δ) | CLIP | HPSv2 | 40 次前向 @512 | APRA 轮次（接受/总） |",
-        "|---|---|---|---|---|---|---|---|---|"]
-for d in sorted(glob.glob("outputs/stage2/*/history.json")):
-    d = os.path.dirname(d); n = os.path.basename(d)
-    h = json.load(open(f"{d}/history.json"))
-    ev = json.load(open(f"{d}/eval_dval/summary.json")) if os.path.exists(f"{d}/eval_dval/summary.json") else {}
-    ef = json.load(open(f"{d}/eff_512/summary.json"))["efficiency"] if os.path.exists(f"{d}/eff_512/summary.json") else {}
-    p = h.get("efficiency", {}).get("params_M") or ef.get("params_M")
-    acc = sum(not r.get("rejected") for r in h["rounds"])
-    fid = f'{ev["fid"]:.2f} ({ev["fid"] - base_fid:+.2f})' if "fid" in ev else "-"
-    lat = ef.get("latency_40steps_s")
-    rows.append(f'| {n} | {p / 1e3:.3f}B | {p / h["params_orig"] * 1e6:.3f} | {h.get("removed_single_blocks", [])} | {fid} | '
-                f'{ev.get("clip", float("nan")):.2f} | {ev.get("hps", float("nan")):.4f} | {lat if lat is None else round(lat, 2)} | {acc}/{len(h["rounds"])} |')
-txt = f"未剪枝 4B：3.876B，D_val FID {base_fid:.2f}（σ=0.73）\n\n" + "\n".join(rows) + "\n"
-open("outputs/stage2/summary.md", "w").write(txt); print(txt)
-PYEOF
+  $PY scripts/plot_stage2.py --root $OUT   # summary.md + 全部图表
 fi
